@@ -1,5 +1,6 @@
 mod spin_lock;
-
+mod channel;
+mod one_shot_ch;
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
