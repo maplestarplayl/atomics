@@ -1,4 +1,5 @@
 use std::cell::UnsafeCell;
+use std::iter::Rev;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -9,29 +10,42 @@ pub struct Channel<T> {
     ready: AtomicBool,
 }
 
-pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let ch = Arc::new(Channel {
-        message: UnsafeCell::new(MaybeUninit::uninit()),
-        ready: AtomicBool::new(false),
-    });
-    (
-        Sender {
-            channel: ch.clone(),
-        },
-        Receiver { channel: ch },
-    )
-}
+// pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+//     let ch = Arc::new(Channel {
+//         message: UnsafeCell::new(MaybeUninit::uninit()),
+//         ready: AtomicBool::new(false),
+//     });
+//     (
+//         Sender {
+//             channel: ch.clone(),
+//         },
+//         Receiver { channel: ch },
+//     )
+// }
 
+impl<T> Channel<T> {
+    pub fn new() -> Self {
+        Channel {
+            message: UnsafeCell::new(MaybeUninit::uninit()),
+            ready: AtomicBool::new(false),
+        }
+    }
+
+    pub fn split<'a>(&'a mut self) -> (Sender<'a, T>, Receiver<'a, T>) {
+        *self = Self::new();
+        (Sender { channel: self }, Receiver { channel: self })
+    }
+}
 unsafe impl<T> Sync for Channel<T> where T: Send {}
-pub struct Sender<T> {
-    channel: Arc<Channel<T>>,
+pub struct Sender<'a, T> {
+    channel: &'a Channel<T>,
 }
 
-pub struct Receiver<T> {
-    channel: Arc<Channel<T>>,
+pub struct Receiver<'a, T> {
+    channel: &'a Channel<T>,
 }
 
-impl<T> Sender<T> {
+impl<T> Sender<'_, T> {
     pub fn send(self, message: T) {
         unsafe {
             (*self.channel.message.get()).write(message);
@@ -40,7 +54,7 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T> Receiver<T> {
+impl<T> Receiver<'_, T> {
     pub fn is_ready(&self) -> bool {
         self.channel.ready.load(Ordering::Relaxed)
     }
@@ -62,13 +76,14 @@ impl<T> Drop for Channel<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
     use super::*;
+    use std::thread;
 
     #[test]
     fn main() {
+        let mut ch = Channel::new();
         thread::scope(|s| {
-            let (sender, receiver) = channel();
+            let (sender, receiver) = ch.split();
             let t = thread::current();
             s.spawn(move || {
                 sender.send("a");
