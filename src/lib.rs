@@ -1,3 +1,4 @@
+mod arc;
 mod channel;
 mod one_shot_ch;
 mod spin_lock;
