@@ -1,7 +1,7 @@
 use std::{
     cell::UnsafeCell,
+    ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, Ordering},
-    ops::{Deref, DerefMut}
 };
 
 unsafe impl<T> Sync for SpinLock<T> where T: Send {}
@@ -11,13 +11,13 @@ pub struct SpinLock<T> {
 }
 
 pub struct Guard<'a, T> {
-    lock: &'a SpinLock<T>
+    lock: &'a SpinLock<T>,
 }
 impl<T> SpinLock<T> {
     pub fn new(value: T) -> Self {
         Self {
             locked: AtomicBool::new(false),
-            value: UnsafeCell::new(value)
+            value: UnsafeCell::new(value),
         }
     }
 
@@ -32,8 +32,6 @@ impl<T> SpinLock<T> {
         Guard { lock: self }
     }
 }
-
-
 
 impl<T> Deref for Guard<'_, T> {
     type Target = T;
@@ -55,7 +53,6 @@ impl<T> Drop for Guard<'_, T> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,14 +64,13 @@ mod tests {
         std::thread::scope(|s| {
             s.spawn(|| x.lock().push(1));
             s.spawn(|| {
-                let mut  v = x.lock();
+                let mut v = x.lock();
                 v.push(2);
                 v.push(3);
             });
         });
 
-        let g =x.lock();
+        let g = x.lock();
         assert!(g.as_slice() == [1, 2, 3] || g.as_slice() == [2, 3, 1]);
-
     }
 }
