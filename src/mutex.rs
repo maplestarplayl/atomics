@@ -18,7 +18,7 @@ pub struct Mutex<T> {
 unsafe impl<T> Sync for Mutex<T> where T: Send {}
 
 pub struct Guard<'a, T> {
-    lock: &'a Mutex<T>,
+    pub(crate) lock: &'a Mutex<T>,
 }
 
 impl<T> Mutex<T> {

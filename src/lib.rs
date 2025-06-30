@@ -1,5 +1,6 @@
 mod arc;
 mod channel;
+pub mod condvar;
 pub mod mutex;
 mod one_shot_ch;
 mod spin_lock;
