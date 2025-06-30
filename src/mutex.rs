@@ -2,7 +2,7 @@ use std::{
     cell::UnsafeCell,
     hint::spin_loop,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 use atomic_wait::{wait, wake_one};
