@@ -8,7 +8,8 @@ use atomic_wait::{wait, wake_one};
 
 pub struct Mutex<T> {
     /// 0: unlocked
-    /// 1: locked
+    /// 1: locked, no other threads waiting
+    /// 2: locked, other threads waiting
     state: AtomicU32,
     value: UnsafeCell<T>,
 }
@@ -28,9 +29,15 @@ impl<T> Mutex<T> {
     }
 
     pub fn lock(&self) -> Guard<T> {
-        while self.state.swap(1, Ordering::Acquire) == 1 {
-            // wait unless the state is not 1
-            wait(&self.state, 1);
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            while self.state.swap(2, Ordering::Acquire) != 0 {
+                // wait unless the state is not 1
+                wait(&self.state, 2);
+            }
         }
         Guard { lock: self }
     }
@@ -56,6 +63,8 @@ impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         self.lock.state.store(0, Ordering::Release);
 
-        wake_one(&self.lock.state);
+        if self.lock.state.swap(0, Ordering::Release) == 2 {
+            wake_one(&self.lock.state);
+        }
     }
 }
