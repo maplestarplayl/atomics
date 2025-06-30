@@ -9,7 +9,7 @@ pub struct SpinLock<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,
 }
-
+// 'a to ensure guard's lifetime is shorter than lock
 pub struct Guard<'a, T> {
     lock: &'a SpinLock<T>,
 }

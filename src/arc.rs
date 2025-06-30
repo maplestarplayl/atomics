@@ -4,8 +4,6 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering, fence},
 };
 
-use crate::spin_lock::SpinLock;
-
 struct ArcData<T> {
     ref_count: AtomicUsize,
     data: T,
