@@ -1,6 +1,6 @@
 mod arc;
 mod channel;
-mod mutex;
+pub mod mutex;
 mod one_shot_ch;
 mod spin_lock;
 pub fn add(left: u64, right: u64) -> u64 {
