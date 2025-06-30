@@ -29,6 +29,14 @@ impl<T> Arc<T> {
         }
     }
 
+    pub fn get_mut(arc: &mut Self) -> Option<&mut T> {
+        if arc.data().ref_count.load(Ordering::Relaxed) == 1 {
+            fence(Ordering::Acquire);
+            unsafe { return Some(&mut arc.ptr.as_mut().data) }
+        }
+        None
+    }
+
     fn data(&self) -> &ArcData<T> {
         unsafe { self.ptr.as_ref() }
     }
