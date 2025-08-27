@@ -67,12 +67,12 @@ impl<T> Drop for Arc<T> {
 }
 
 mod tests {
-    use std::thread;
-
-    use super::*;
-
+    
+    
     #[test]
     fn test() {
+        use super::*;
+        use std::thread;
         static NUM_DROPS: AtomicUsize = AtomicUsize::new(0);
 
         struct DectorDrop;

@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+
+mod lfqueue;
 mod arc;
 mod channel;
 pub mod condvar;

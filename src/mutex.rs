@@ -29,7 +29,7 @@ impl<T> Mutex<T> {
         }
     }
 
-    pub fn lock(&self) -> Guard<T> {
+    pub fn lock(&self) -> Guard<'_, T> {
         if self
             .state
             .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
@@ -86,12 +86,17 @@ impl<T> Drop for Guard<'_, T> {
 }
 
 mod tests {
-    use std::{thread, time::Instant};
-
-    use super::*;
-
+    
+    
+    
+    
+    
     #[test]
     fn main() {
+        use super::*;
+        use std::time::Instant;
+        use std::thread;
+
         let m = Mutex::new(0);
         std::hint::black_box(&m);
         let start = Instant::now();

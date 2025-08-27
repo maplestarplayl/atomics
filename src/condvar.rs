@@ -2,7 +2,7 @@ use atomic_wait::{wait, wake_all, wake_one};
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::Relaxed;
 
-use crate::mutex::{self, Guard};
+use crate::mutex::Guard;
 
 pub struct Condvar {
     counter: AtomicU32,
