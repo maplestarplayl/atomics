@@ -67,8 +67,7 @@ impl<T> Drop for Arc<T> {
 }
 
 mod tests {
-    
-    
+
     #[test]
     fn test() {
         use super::*;

@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-mod lfqueue;
 mod arc;
 mod channel;
 pub mod condvar;
+mod lfqueue;
 pub mod mutex;
 mod one_shot_ch;
 pub mod rwlock;

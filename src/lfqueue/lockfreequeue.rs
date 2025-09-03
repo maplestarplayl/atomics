@@ -1,4 +1,7 @@
-use std::{ptr, sync::atomic::{AtomicPtr, Ordering}};
+use std::{
+    ptr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 struct Node<T> {
     data: Option<T>,
@@ -95,16 +98,13 @@ impl<T> LockFreeQueue<T> {
             let next_node = unsafe { &*next_ptr };
             let data = next_node.data.as_ref().unwrap();
 
-            let result = self.head.compare_exchange(
-                head_ptr,
-                next_ptr,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            );
+            let result =
+                self.head
+                    .compare_exchange(head_ptr, next_ptr, Ordering::AcqRel, Ordering::Relaxed);
 
             if result.is_ok() {
                 let old_head_box = unsafe { Box::from_raw(head_ptr) };
-                
+
                 // We can't move `data` out of `next_node` because it's behind a shared
                 // reference. The safe way is to take the Option<T> out, leaving None.
                 // However, since we are designing the queue, a simpler (but unsafe) way
@@ -113,7 +113,7 @@ impl<T> LockFreeQueue<T> {
                 let data = unsafe { ptr::read(data) };
 
                 // Let the Box go out of scope, freeing the memory of the old sentinel.
-                drop(old_head_box); 
+                drop(old_head_box);
 
                 return Some(data);
             }
@@ -121,11 +121,10 @@ impl<T> LockFreeQueue<T> {
     }
 }
 
-
 impl<T> Drop for LockFreeQueue<T> {
     fn drop(&mut self) {
         // Keep popping until the queue is empty.
-        while let Some(_) = self.pop() { 
+        while let Some(_) = self.pop() {
             // The `pop` method handles deallocation of the old head node.
         }
 

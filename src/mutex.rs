@@ -86,16 +86,12 @@ impl<T> Drop for Guard<'_, T> {
 }
 
 mod tests {
-    
-    
-    
-    
-    
+
     #[test]
     fn main() {
         use super::*;
-        use std::time::Instant;
         use std::thread;
+        use std::time::Instant;
 
         let m = Mutex::new(0);
         std::hint::black_box(&m);
