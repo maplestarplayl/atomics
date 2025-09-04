@@ -1,7 +1,10 @@
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 // A struct to ensure cache line alignment to prevent **false sharing**.
@@ -15,112 +18,119 @@ struct CachePadded<T>(pub T);
 ///FIFO3:
 ///  - Use `CachePadded` struct to wrap atomic variables, preventing false sharing.
 ///  - Use `Ordering::Acquire` and `Ordering::Release` for better performance while maintaining correctness.
-/// 
-/// 
+///FIFO4:
+///  - Use local cache variables in Producer and Consumer to reduce the number of atomic loads.
+///  - Split `Fifo` into `Producer` and `Consumer` structs for better separation of concerns.
+///
+///
 /// Guidelines for using atomic orderings
 /// 1. Use `Ordering::SeqCst` for simplicity and strong guarantees.
 /// 2. Use `Ordering::Acquire` for loads that other threads write to.
 /// 3. Use `Ordering::Release` for stores that other threads read from.
 /// 4. Use `Ordering::AcqRel` for read-modify-write operations.
 /// 5. Use `Ordering::Relaxed` for operations that don't require ordering guarantees.
-pub struct Fifo3<T> {
+struct Shared<T: Send> {
     buffer: Vec<UnsafeCell<MaybeUninit<T>>>,
     capacity: usize,
     head: CachePadded<AtomicU64>,
     tail: CachePadded<AtomicU64>,
 }
 
-unsafe impl<T: Send> Send for Fifo3<T> {}
-unsafe impl<T: Send> Sync for Fifo3<T> {}
+pub struct Producer<T: Send> {
+    shared: Arc<Shared<T>>,
+    head: u64,
+    // Local cache of producer's tail to reduce atomic loads
+    cache_tail: u64,
+}
 
-impl<T: Send> Fifo3<T> {
-    pub fn new(capacity: usize) -> Self {
-        assert!(capacity > 0);
+pub struct Consumer<T: Send> {
+    shared: Arc<Shared<T>>,
+    tail: u64,
+    // Local cache of consumer's head to reduce atomic loads
+    cache_head: u64,
+}
 
-        let mut buffer = Vec::with_capacity(capacity);
+pub fn new<T: Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
+    assert!(capacity > 0);
 
-        unsafe {
-            buffer.set_len(capacity);
-        }
-
-        for _ in 0..capacity {
-            buffer.push(UnsafeCell::new(MaybeUninit::uninit()));
-        }
-
-        Self {
-            buffer,
-            capacity,
-            head: CachePadded(AtomicU64::new(0)),
-            tail: CachePadded(AtomicU64::new(0)),
-        }
+    let mut buffer = Vec::with_capacity(capacity);
+    for _ in 0..capacity {
+        buffer.push(UnsafeCell::new(MaybeUninit::uninit()));
     }
 
+    unsafe {
+        buffer.set_len(capacity);
+    }
+    let shared = Arc::new(Shared {
+        buffer,
+        capacity,
+        head: CachePadded(AtomicU64::new(0)),
+        tail: CachePadded(AtomicU64::new(0)),
+    });
+    let producer = Producer {
+        shared: shared.clone(),
+        head: 0,
+        cache_tail: 0,
+    };
+    let consumer = Consumer {
+        shared,
+        tail: 0,
+        cache_head: 0,
+    };
+
+    (producer, consumer)
+}
+
+impl<T: Send> Producer<T> {
     pub fn push(&mut self, value: T) -> Result<(), T> {
-        let head = self.head.0.load(Ordering::Relaxed);
-        // Use `Relaxed` since not need to sync with other threads here.
-        // Only need an approximate value of tail to check for full queue.
-        let tail = self.tail.0.load(Ordering::Relaxed);
+        if self.head - self.cache_tail == self.shared.capacity as u64 {
+            // Update local cache of tail
+            self.cache_tail = self.shared.tail.0.load(Ordering::Acquire);
 
-        if head.wrapping_sub(tail) == self.capacity as u64 {
-            return Err(value);
+            if self.head - self.cache_tail == self.shared.capacity as u64 {
+                return Err(value);
+            }
         }
 
-        let index = head % self.capacity as u64;
+        let index = self.head % self.shared.capacity as u64;
 
         unsafe {
-            (*self.buffer.get_unchecked_mut(index as usize).get()).write(value);
+            (*self.shared.buffer[index as usize].get())
+                .as_mut_ptr()
+                .write(value);
         }
 
-        self.head.0.store(head + 1, Ordering::Release);
+        self.head += 1;
 
+        self.shared.head.0.store(self.head, Ordering::Release);
         Ok(())
-    }
-
-    pub fn pop(&mut self) -> Option<T> {
-        let head = self.head.0.load(Ordering::Acquire);
-        let tail = self.tail.0.load(Ordering::Relaxed);
-
-        if head == tail {
-            return None;
-        }
-
-        let index = tail % self.capacity as u64;
-
-        let value =
-            unsafe { (*self.buffer.get_unchecked(index as usize).get()).assume_init_read() };
-
-        //Since the producer use `Relaxed` to load head, here we use `Relaxed` to load tail.
-        self.tail.0.store(tail + 1, Ordering::Relaxed);
-
-        Some(value)
-    }
-
-    /// 返回队列的容量。
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    /// 检查队列是否为空。
-    pub fn is_empty(&self) -> bool {
-        // 使用 Acquire 确保我们能看到最新的 push 值
-        self.head.0.load(Ordering::Acquire) == self.tail.0.load(Ordering::Acquire)
     }
 }
 
-/// 实现 Drop trait 以确保队列销毁时，其中剩余的元素能够被正确地丢弃。
-impl<T> Drop for Fifo3<T> {
-    fn drop(&mut self) {
-        // 在 drop 中我们拥有 &mut self，可以直接访问内部数据。
-        let push_cursor = *self.head.0.get_mut();
-        let mut pop_cursor = *self.tail.0.get_mut();
+impl<T: Send> Consumer<T> {
+    pub fn pop(&mut self) -> Option<T> {
+        if self.tail == self.cache_head {
+            // Update local cache of head
+            self.cache_head = self.shared.head.0.load(Ordering::Acquire);
 
-        while pop_cursor < push_cursor {
-            let index = (pop_cursor % self.capacity as u64) as usize;
-            unsafe {
-                // 安全地读取值的所有权，然后让它在离开作用域时被 drop。
-                (*self.buffer.get_unchecked(index).get()).assume_init_read();
+            if self.tail == self.cache_head {
+                return None;
             }
-            pop_cursor += 1;
         }
+
+        let index = self.tail % self.shared.capacity as u64;
+
+        let value = unsafe { (*self.shared.buffer[index as usize].get()).as_ptr().read() };
+
+        self.tail += 1;
+
+        self.shared.tail.0.store(self.tail, Ordering::Release);
+        Some(value)
+    }
+}
+
+impl<T: Send> Drop for Consumer<T> {
+    fn drop(&mut self) {
+        while self.pop().is_some() {}
     }
 }
