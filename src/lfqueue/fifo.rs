@@ -1,22 +1,39 @@
-use std::{cell::UnsafeCell, mem::MaybeUninit, sync::atomic::{AtomicU64, Ordering}};
+use std::{
+    cell::UnsafeCell,
+    mem::MaybeUninit,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
+// A struct to ensure cache line alignment to prevent **false sharing**.
+#[repr(align(64))]
+struct CachePadded<T>(pub T);
 
-///Fifo2:
+///FIFO2:
 ///  - Use atomic operations to manage head and tail indices.
 ///  - Use UnsafeCell to solve interior mutability issues.
 ///  - Use `Ordering::SeqCst` to ensure strong memory ordering guarantees.
-pub struct Fifo2<T> {
+///FIFO3:
+///  - Use `CachePadded` struct to wrap atomic variables, preventing false sharing.
+///  - Use `Ordering::Acquire` and `Ordering::Release` for better performance while maintaining correctness.
+/// 
+/// 
+/// Guidelines for using atomic orderings
+/// 1. Use `Ordering::SeqCst` for simplicity and strong guarantees.
+/// 2. Use `Ordering::Acquire` for loads that other threads write to.
+/// 3. Use `Ordering::Release` for stores that other threads read from.
+/// 4. Use `Ordering::AcqRel` for read-modify-write operations.
+/// 5. Use `Ordering::Relaxed` for operations that don't require ordering guarantees.
+pub struct Fifo3<T> {
     buffer: Vec<UnsafeCell<MaybeUninit<T>>>,
     capacity: usize,
-    head: AtomicU64,
-    tail: AtomicU64,
+    head: CachePadded<AtomicU64>,
+    tail: CachePadded<AtomicU64>,
 }
 
-unsafe impl <T: Send> Send for Fifo2<T> {}
-unsafe impl <T: Send> Sync for Fifo2<T> {}
+unsafe impl<T: Send> Send for Fifo3<T> {}
+unsafe impl<T: Send> Sync for Fifo3<T> {}
 
-
-impl<T: Send> Fifo2<T> {
+impl<T: Send> Fifo3<T> {
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0);
 
@@ -33,14 +50,16 @@ impl<T: Send> Fifo2<T> {
         Self {
             buffer,
             capacity,
-            head: AtomicU64::new(0),
-            tail: AtomicU64::new(0),
+            head: CachePadded(AtomicU64::new(0)),
+            tail: CachePadded(AtomicU64::new(0)),
         }
     }
 
     pub fn push(&mut self, value: T) -> Result<(), T> {
-        let head = self.head.load(Ordering::SeqCst);
-        let tail = self.tail.load(Ordering::SeqCst);
+        let head = self.head.0.load(Ordering::Relaxed);
+        // Use `Relaxed` since not need to sync with other threads here.
+        // Only need an approximate value of tail to check for full queue.
+        let tail = self.tail.0.load(Ordering::Relaxed);
 
         if head.wrapping_sub(tail) == self.capacity as u64 {
             return Err(value);
@@ -52,15 +71,14 @@ impl<T: Send> Fifo2<T> {
             (*self.buffer.get_unchecked_mut(index as usize).get()).write(value);
         }
 
-        self.head.store(head + 1, Ordering::SeqCst);
+        self.head.0.store(head + 1, Ordering::Release);
 
         Ok(())
     }
 
-
     pub fn pop(&mut self) -> Option<T> {
-        let head = self.head.load(Ordering::SeqCst);
-        let tail = self.tail.load(Ordering::SeqCst);
+        let head = self.head.0.load(Ordering::Acquire);
+        let tail = self.tail.0.load(Ordering::Relaxed);
 
         if head == tail {
             return None;
@@ -68,11 +86,12 @@ impl<T: Send> Fifo2<T> {
 
         let index = tail % self.capacity as u64;
 
-        let value = unsafe {
-            (*self.buffer.get_unchecked(index as usize).get()).assume_init_read()
-        };
+        let value =
+            unsafe { (*self.buffer.get_unchecked(index as usize).get()).assume_init_read() };
 
-        self.tail.store(tail + 1, Ordering::SeqCst);
+        //Since the producer use `Relaxed` to load head, here we use `Relaxed` to load tail.
+        self.tail.0.store(tail + 1, Ordering::Relaxed);
+
         Some(value)
     }
 
@@ -81,32 +100,19 @@ impl<T: Send> Fifo2<T> {
         self.capacity
     }
 
-    /// 返回队列中当前的元素数量 (可能不是最新的)。
-    pub fn len(&self) -> usize {
-        let head = self.head.load(Ordering::SeqCst);
-        let tail = self.tail.load(Ordering::SeqCst);
-        (head.wrapping_sub(tail)) as usize
-    }
-
     /// 检查队列是否为空。
     pub fn is_empty(&self) -> bool {
-        self.head.load(Ordering::SeqCst) == self.tail.load(Ordering::SeqCst)
-    }
-
-    /// 检查队列是否已满。
-    pub fn is_full(&self) -> bool {
-        let head = self.head.load(Ordering::SeqCst);
-        let tail = self.tail.load(Ordering::SeqCst);
-        head.wrapping_sub(tail) as usize == self.capacity
+        // 使用 Acquire 确保我们能看到最新的 push 值
+        self.head.0.load(Ordering::Acquire) == self.tail.0.load(Ordering::Acquire)
     }
 }
 
 /// 实现 Drop trait 以确保队列销毁时，其中剩余的元素能够被正确地丢弃。
-impl<T> Drop for Fifo2<T> {
+impl<T> Drop for Fifo3<T> {
     fn drop(&mut self) {
         // 在 drop 中我们拥有 &mut self，可以直接访问内部数据。
-        let push_cursor = *self.head.get_mut();
-        let mut pop_cursor = *self.tail.get_mut();
+        let push_cursor = *self.head.0.get_mut();
+        let mut pop_cursor = *self.tail.0.get_mut();
 
         while pop_cursor < push_cursor {
             let index = (pop_cursor % self.capacity as u64) as usize;
@@ -118,4 +124,3 @@ impl<T> Drop for Fifo2<T> {
         }
     }
 }
-
