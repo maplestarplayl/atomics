@@ -1,6 +1,7 @@
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
+    ops::Deref,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -21,7 +22,9 @@ struct CachePadded<T>(pub T);
 ///FIFO4:
 ///  - Use local cache variables in Producer and Consumer to reduce the number of atomic loads.
 ///  - Split `Fifo` into `Producer` and `Consumer` structs for better separation of concerns.
-///
+///FIFO5:
+///  - Introduce `Pusher` and `Popper` proxy objects to implement `zero copy`
+///  - Use `Drop` trait to automatically handle head/tail updates when the proxy objects go out of scope.
 ///
 /// Guidelines for using atomic orderings
 /// 1. Use `Ordering::SeqCst` for simplicity and strong guarantees.
@@ -36,6 +39,9 @@ struct Shared<T: Send> {
     tail: CachePadded<AtomicU64>,
 }
 
+unsafe impl<T: Send> Send for Producer<T> {}
+unsafe impl<T: Send> Send for Consumer<T> {}
+
 pub struct Producer<T: Send> {
     shared: Arc<Shared<T>>,
     head: u64,
@@ -49,6 +55,56 @@ pub struct Consumer<T: Send> {
     // Local cache of consumer's head to reduce atomic loads
     cache_head: u64,
 }
+// --- Fifo5: Proxy Objects ---
+
+pub struct Pusher<'a, T: Send> {
+    producer: &'a mut Producer<T>,
+    slot: *mut MaybeUninit<T>,
+}
+
+impl<T: Send> Pusher<'_, T> {
+    pub fn write(self, value: T) {
+        unsafe { (*self.slot).write(value) };
+        // self will be consumed here, then call the `drop` method
+    }
+}
+
+impl<T: Send> Drop for Pusher<'_, T> {
+    fn drop(&mut self) {
+        self.producer.head += 1;
+        self.producer
+            .shared
+            .head
+            .0
+            .store(self.producer.head, Ordering::Release);
+    }
+}
+
+pub struct Popper<'a, T: Send> {
+    consumer: &'a mut Consumer<T>,
+    slot: *const MaybeUninit<T>,
+}
+
+impl<'a, T: Send> Deref for Popper<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        unsafe { (*self.slot).assume_init_ref() }
+    }
+}
+
+impl<T: Send> Drop for Popper<'_, T> {
+    fn drop(&mut self) {
+        unsafe { (*self.slot.cast_mut()).assume_init_drop() };
+
+        self.consumer.tail += 1;
+        self.consumer
+            .shared
+            .tail
+            .0
+            .store(self.consumer.tail, Ordering::Release);
+    }
+}
+
 
 pub fn new<T: Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     assert!(capacity > 0);
@@ -81,34 +137,32 @@ pub fn new<T: Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     (producer, consumer)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct FullError;
+
 impl<T: Send> Producer<T> {
-    pub fn push(&mut self, value: T) -> Result<(), T> {
+    pub fn push(&mut self) -> Result<Pusher<'_, T>, FullError> {
         if self.head - self.cache_tail == self.shared.capacity as u64 {
             // Update local cache of tail
             self.cache_tail = self.shared.tail.0.load(Ordering::Acquire);
 
             if self.head - self.cache_tail == self.shared.capacity as u64 {
-                return Err(value);
+                return Err(FullError);
             }
         }
 
         let index = self.head % self.shared.capacity as u64;
+        let slot = unsafe { self.shared.buffer.get_unchecked(index as usize).get() };
 
-        unsafe {
-            (*self.shared.buffer[index as usize].get())
-                .as_mut_ptr()
-                .write(value);
-        }
-
-        self.head += 1;
-
-        self.shared.head.0.store(self.head, Ordering::Release);
-        Ok(())
+        Ok(Pusher {
+            producer: self,
+            slot,
+        })
     }
 }
 
 impl<T: Send> Consumer<T> {
-    pub fn pop(&mut self) -> Option<T> {
+    pub fn pop(&mut self) -> Option<Popper<'_, T>> {
         if self.tail == self.cache_head {
             // Update local cache of head
             self.cache_head = self.shared.head.0.load(Ordering::Acquire);
@@ -118,14 +172,13 @@ impl<T: Send> Consumer<T> {
             }
         }
 
-        let index = self.tail % self.shared.capacity as u64;
+        let index = (self.tail % self.shared.capacity as u64) as usize;
+        let slot = unsafe { self.shared.buffer.get_unchecked(index).get() };
 
-        let value = unsafe { (*self.shared.buffer[index as usize].get()).as_ptr().read() };
-
-        self.tail += 1;
-
-        self.shared.tail.0.store(self.tail, Ordering::Release);
-        Some(value)
+        Some(Popper {
+            consumer: self,
+            slot,
+        })
     }
 }
 
